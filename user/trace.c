@@ -7,7 +7,7 @@ int
 main(int argc, char *argv[])
 {
   int i;
-  char *nargv[MAXARG];
+  char *nargv[MAXARG]={0};
 
   if(argc < 3 || (argv[1][0] < '0' || argv[1][0] > '9')){
     fprintf(2, "Usage: %s mask command\n", argv[0]);
@@ -22,6 +22,7 @@ main(int argc, char *argv[])
   for(i = 2; i < argc && i < MAXARG; i++){
     nargv[i-2] = argv[i];
   }
+  nargv[i-2] = 0;
   exec(nargv[0], nargv);
   exit(0);
 }
