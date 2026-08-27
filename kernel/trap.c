@@ -65,7 +65,19 @@ usertrap(void)
     intr_on();
 
     syscall();
-  } else if((which_dev = devintr()) != 0){
+  }else if(r_scause() == 13 || r_scause() == 15) {
+    // 页错误（13=读错误，15=写错误）
+    uint64 va = r_stval();
+    // 只处理用户空间地址且小于 MAXVA
+    if (va >= MAXVA) {
+      p->killed = 1;
+    } else {
+      // cowalloc 会检查是否为 COW 页，并分配新页
+      if (cowalloc(p->pagetable, va) < 0) {
+        p->killed = 1;
+      }
+    }
+  }else if((which_dev = devintr()) != 0){
     // ok
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);

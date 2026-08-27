@@ -303,7 +303,6 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
@@ -312,13 +311,20 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+    // 如果是可写页，改为 COW
+    if(flags & PTE_W) {
+      // 清除 PTE_W，设置 PTE_COW
+      flags = (flags & ~PTE_W) | PTE_COW;
+      // 修改父进程的 PTE
+      *pte = PA2PTE(pa) | flags;
+    }
+    
+    // 映射到子进程页表
+    if(mappages(new, i, PGSIZE, pa, flags) != 0) {
       goto err;
     }
+    // 增加引用计数（共享物理页）
+    incref(pa);
   }
   return 0;
 
@@ -350,6 +356,18 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
+    if(va0 >= MAXVA)
+      return -1;
+    // 检查是否是 COW 页，如果是则分配新页
+    pte_t *pte = walk(pagetable, va0, 0);
+    if(pte == 0 || (*pte & PTE_V) == 0)
+      return -1;
+
+    if(*pte & PTE_COW){
+      if(cowalloc(pagetable, va0) < 0)
+        return -1;
+    }
+    
     pa0 = walkaddr(pagetable, va0);
     if(pa0 == 0)
       return -1;
@@ -431,4 +449,44 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+}
+
+int cowalloc(pagetable_t pagetable, uint64 va)
+{
+  // 获取 PTE
+  pte_t *pte = walk(pagetable, va, 0);
+  if (pte == 0)
+    return -1;
+  if ((*pte & PTE_V) == 0)
+    return -1;
+  if ((*pte & PTE_COW) == 0)
+    return -1;   // 不是 COW 页，不处理
+
+  uint64 pa = PTE2PA(*pte);
+  uint flags = PTE_FLAGS(*pte);
+
+  // 如果引用计数为 1，直接变成可写页
+  if (getref(pa) == 1) 
+  {
+    *pte = PA2PTE(pa) | flags | PTE_W;
+    *pte &= ~PTE_COW;
+    return 0;
+  }
+
+  // 分配新物理页
+  char *mem = kalloc();
+  if (mem == 0)
+    return -1;
+
+  // 复制原页内容
+  memmove(mem, (char*)pa, PGSIZE);
+
+  // 释放原页的引用（减少计数）
+  kfree((void*)pa);
+
+  // 更新 PTE 指向新页，可写，清除 COW 标记
+  *pte = PA2PTE((uint64)mem) | flags | PTE_W;
+  *pte &= ~PTE_COW;
+
+  return 0;
 }
