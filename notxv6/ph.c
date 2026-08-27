@@ -8,6 +8,8 @@
 #define NBUCKET 5
 #define NKEYS 100000
 
+pthread_mutex_t locks[NBUCKET];  
+
 struct entry {
   int key;
   int value;
@@ -41,6 +43,8 @@ void put(int key, int value)
 {
   int i = key % NBUCKET;
 
+  pthread_mutex_lock(&locks[i]);   // 加锁
+
   // is the key already present?
   struct entry *e = 0;
   for (e = table[i]; e != 0; e = e->next) {
@@ -54,6 +58,7 @@ void put(int key, int value)
     // the new is new.
     insert(key, value, &table[i], table[i]);
   }
+  pthread_mutex_unlock(&locks[i]); // 解锁
 
 }
 
@@ -62,12 +67,18 @@ get(int key)
 {
   int i = key % NBUCKET;
 
+  pthread_mutex_lock(&locks[i]);   // 加锁
 
   struct entry *e = 0;
-  for (e = table[i]; e != 0; e = e->next) {
-    if (e->key == key) break;
+  for (e = table[i]; e != 0; e = e->next) 
+  {
+    if (e->key == key)
+    {
+      pthread_mutex_unlock(&locks[i]); // 找到后解锁再返回
+      return e;   
+    }
   }
-
+  pthread_mutex_unlock(&locks[i]); // 未找到，解锁
   return e;
 }
 
@@ -113,6 +124,8 @@ main(int argc, char *argv[])
   nthread = atoi(argv[1]);
   tha = malloc(sizeof(pthread_t) * nthread);
   srandom(0);
+  for (int i = 0; i < NBUCKET; i++)
+    pthread_mutex_init(&locks[i], NULL);   
   assert(NKEYS % nthread == 0);
   for (int i = 0; i < NKEYS; i++) {
     keys[i] = random();

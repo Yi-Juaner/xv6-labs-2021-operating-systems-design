@@ -10,10 +10,16 @@
 #define STACK_SIZE  8192
 #define MAX_THREAD  4
 
+struct context {
+  uint64 ra;
+  uint64 sp;
+  uint64 s0, s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11;
+};
 
 struct thread {
   char       stack[STACK_SIZE]; /* the thread's stack */
   int        state;             /* FREE, RUNNING, RUNNABLE */
+  struct context context;
 };
 struct thread all_thread[MAX_THREAD];
 struct thread *current_thread;
@@ -58,12 +64,15 @@ thread_schedule(void)
     next_thread->state = RUNNING;
     t = current_thread;
     current_thread = next_thread;
-    /* YOUR CODE HERE
-     * Invoke thread_switch to switch from t to next_thread:
-     * thread_switch(??, ??);
-     */
+    if (t->state != FREE && t != &all_thread[0]) 
+    {
+        t->state = RUNNABLE;
+    }
+    // 调用汇编函数切换上下文
+    thread_switch((uint64)&t->context, (uint64)&next_thread->context);
   } else
-    next_thread = 0;
+    // 如果只有当前线程可运行，直接执行
+    next_thread->state = RUNNING;
 }
 
 void 
@@ -75,7 +84,10 @@ thread_create(void (*func)())
     if (t->state == FREE) break;
   }
   t->state = RUNNABLE;
-  // YOUR CODE HERE
+  // 设置栈指针（栈向下增长）
+  t->context.sp = (uint64)(t->stack + STACK_SIZE);
+  // 设置返回地址为函数入口
+  t->context.ra = (uint64)func;
 }
 
 void 
