@@ -432,3 +432,35 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
     return -1;
   }
 }
+
+// 递归打印页表
+static void vmprint_rec(pagetable_t pagetable, int depth)
+{
+  // 每个页表有 512 个条目
+  for (int i = 0; i < 512; i++) 
+  {
+    pte_t pte = pagetable[i];
+    if (pte & PTE_V)
+    {
+      // 缩进
+      for (int j = 0; j < depth; j++)
+        printf(" ..");
+      // 打印条目索引、PTE 值和物理地址
+      printf("%d: pte %p pa %p\n", i, pte, PTE2PA(pte));
+      
+      // 如果 PTE 指向下一级页表（非叶子节点）
+      if ((pte & (PTE_R | PTE_W | PTE_X)) == 0) 
+      {
+        uint64 child = PTE2PA(pte);
+        vmprint_rec((pagetable_t)child, depth + 1);
+      }
+    }
+  }
+}
+
+// 入口函数
+void vmprint(pagetable_t pagetable)
+{
+  printf("page table %p\n", pagetable);
+  vmprint_rec(pagetable, 1);
+}
