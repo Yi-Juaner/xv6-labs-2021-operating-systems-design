@@ -70,6 +70,7 @@ sys_sleep(void)
     sleep(&ticks, &tickslock);
   }
   release(&tickslock);
+  backtrace();
   return 0;
 }
 
@@ -94,4 +95,41 @@ sys_uptime(void)
   xticks = ticks;
   release(&tickslock);
   return xticks;
+}
+
+uint64
+sys_sigalarm(void)
+{
+  int ticks;
+  uint64 handler;
+  struct proc *p = myproc();
+  
+  if (argint(0, &ticks) < 0 || argaddr(1, &handler) < 0)
+    return -1;
+  
+  p->alarm_interval = ticks;
+  p->alarm_handler = (void(*)())handler;
+  p->alarm_ticks = ticks;      // 初始设置为间隔
+  p->alarm_in_handler = 0;     // 初始不在处理中
+  
+  return 0;
+}
+
+uint64
+sys_sigreturn(void)
+{
+  struct proc *p = myproc();
+  
+  // 恢复保存的 trapframe
+  if (p->alarm_trapframe) {
+    *p->trapframe = *p->alarm_trapframe;
+    kfree(p->alarm_trapframe);
+    p->alarm_trapframe = 0;
+  }
+  
+  // 重置计时器
+  p->alarm_ticks = p->alarm_interval;
+  p->alarm_in_handler = 0;
+  
+  return 0; // 返回值会被存储在 a0 中，但用户程序通常忽略
 }

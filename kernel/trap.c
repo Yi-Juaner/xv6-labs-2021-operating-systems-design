@@ -78,7 +78,34 @@ usertrap(void)
 
   // give up the CPU if this is a timer interrupt.
   if(which_dev == 2)
+  {
+    if(p->alarm_interval != 0 && p->alarm_in_handler == 0) 
+    {
+      p->alarm_ticks--;
+      if(p->alarm_ticks == 0) 
+      {
+      // 分配一个 trapframe 副本保存当前状态
+        if(p->alarm_trapframe == 0) 
+        {
+          p->alarm_trapframe = (struct trapframe*)kalloc();
+          if(p->alarm_trapframe == 0) 
+          {
+            panic("usertrap: kalloc alarm trapframe");
+          }
+        }
+        // 复制当前 trapframe（即用户进程被中断时的状态）
+       *p->alarm_trapframe = *p->trapframe;
+      
+        // 设置 epc 指向处理函数
+        p->trapframe->epc = (uint64)p->alarm_handler;
+      
+        // 标记正在处理，防止重入
+        p->alarm_in_handler = 1;
+        // 注意：不重置 alarm_ticks，等到 sigreturn 时重置
+      }
+    }
     yield();
+  }
 
   usertrapret();
 }
