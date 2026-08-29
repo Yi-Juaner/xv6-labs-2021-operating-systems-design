@@ -1,3 +1,15 @@
+#define NVMA 16
+
+struct vma {
+  int used;
+  uint64 addr;
+  uint64 length;
+  int prot;
+  int flags;
+  uint64 offset;
+  struct file *file;
+};
+
 // Saved registers for kernel context switches.
 struct context {
   uint64 ra;
@@ -105,4 +117,5 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+  struct vma vmas[NVMA];
 };

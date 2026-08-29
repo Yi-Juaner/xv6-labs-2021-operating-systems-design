@@ -120,6 +120,12 @@ found:
   p->pid = allocpid();
   p->state = USED;
 
+  for(int i = 0; i < NVMA; i++)
+  {
+    p->vmas[i].used = 0;
+    p->vmas[i].file = 0;
+  }
+
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
     freeproc(p);
@@ -295,6 +301,13 @@ fork(void)
   // Cause fork to return 0 in the child.
   np->trapframe->a0 = 0;
 
+  for(i = 0; i < NVMA; i++){
+    if(p->vmas[i].used){
+      np->vmas[i] = p->vmas[i];
+      np->vmas[i].file = filedup(p->vmas[i].file);
+    }
+  }
+
   // increment reference counts on open file descriptors.
   for(i = 0; i < NOFILE; i++)
     if(p->ofile[i])
@@ -343,6 +356,13 @@ exit(int status)
 
   if(p == initproc)
     panic("init exiting");
+
+  // 清理 mmap 映射
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].used){
+      vmaunmap(p, p->vmas[i].addr, p->vmas[i].length);
+    }
+  }
 
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){

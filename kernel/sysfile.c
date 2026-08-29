@@ -15,6 +15,7 @@
 #include "sleeplock.h"
 #include "file.h"
 #include "fcntl.h"
+#include "memlayout.h"
 
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
@@ -483,4 +484,205 @@ sys_pipe(void)
     return -1;
   }
   return 0;
+}
+
+uint64
+sys_mmap(void)
+{
+  uint64 requested;
+  int length, prot, flags, fd, offset;
+  struct file *f;
+  struct proc *p = myproc();
+  struct vma *v = 0;
+
+  argaddr(0, &requested);
+  argint(1, &length);
+  argint(2, &prot);
+  argint(3, &flags);
+
+  if(argfd(4, &fd, &f) < 0)
+    return -1;
+
+  argint(5, &offset);
+
+  if(requested != 0 || length <= 0 || offset != 0)
+    return -1;
+
+  if(f->type != FD_INODE)
+    return -1;
+
+  if((prot & PROT_READ) && !f->readable)
+    return -1;
+
+  if((flags & MAP_SHARED) &&
+     (prot & PROT_WRITE) &&
+     !f->writable)
+    return -1;
+
+  for(int i = 0; i < NVMA; i++){
+    if(!p->vmas[i].used){
+      v = &p->vmas[i];
+      break;
+    }
+  }
+
+  if(v == 0)
+    return -1;
+
+  uint64 top = TRAPFRAME;
+
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].used && p->vmas[i].addr < top)
+      top = p->vmas[i].addr;
+  }
+
+  uint64 maplen = PGROUNDUP(length);
+
+  if(top < maplen)
+    return -1;
+
+  uint64 addr = PGROUNDDOWN(top - maplen);
+
+  if(addr < PGROUNDUP(p->sz))
+    return -1;
+
+  // 填写 VMA
+  v->used = 1;
+  v->addr = addr;
+  v->length = length;
+  v->prot = prot;
+  v->flags = flags;
+  v->offset = 0;
+  v->file = filedup(f);
+
+  return addr;
+}
+
+int
+vmaunmap(struct proc *p, uint64 addr, uint64 length)
+{
+  struct vma *v = 0;
+  uint64 vend;
+  uint64 unmapend;
+  uint64 realend;
+
+  if(length == 0)
+    return -1;
+
+  // munmap 的起始地址必须页对齐
+  if(addr % PGSIZE != 0)
+    return -1;
+
+  // 防止 addr + length 溢出
+  if(addr + length < addr)
+    return -1;
+
+  /*
+   * 查找包含 addr 的 VMA。
+   * 如果 addr 本来就不属于任何 VMA，直接返回成功。
+   */
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].used &&
+       addr >= p->vmas[i].addr &&
+       addr < p->vmas[i].addr + p->vmas[i].length){
+      v = &p->vmas[i];
+      break;
+    }
+  }
+
+  if(v == 0)
+    return 0;
+
+  vend = v->addr + v->length;
+  unmapend = addr + length;
+
+  /*
+   * 实验只要求支持：
+   * 1. 删除整个 VMA
+   * 2. 删除 VMA 开头
+   * 3. 删除 VMA 结尾
+   *
+   * 不支持从中间打洞。
+   */
+  if(addr != v->addr && unmapend < vend)
+    return -1;
+
+  // 实际解除映射的范围不能超过 VMA
+  realend = unmapend;
+  if(realend > vend)
+    realend = vend;
+
+  /*
+   * 逐页处理。懒加载导致部分页面可能根本不存在，
+   * 所以不能一次性对整个区域调用 uvmunmap()。
+   */
+  for(uint64 va = addr; va < PGROUNDUP(realend); va += PGSIZE){
+    pte_t *pte = walk(p->pagetable, va, 0);
+
+    if(pte == 0 || (*pte & PTE_V) == 0)
+      continue;
+
+    if(v->flags & MAP_SHARED){
+      uint64 pa = PTE2PA(*pte);
+      uint64 fileoff = v->offset + (va - v->addr);
+      uint64 n = PGSIZE;
+
+      // 最后一页只写回 VMA 中实际有效的字节
+      if(va + n > vend)
+        n = vend - va;
+
+      // 如果 munmap 长度不足一整页，也不要写过范围
+      if(va + n > realend)
+        n = realend - va;
+
+      if(n > 0){
+        begin_op();
+        ilock(v->file->ip);
+        int written = writei(v->file->ip, 0, pa, fileoff, n);
+        iunlock(v->file->ip);
+        end_op();
+
+        if(written != n)
+          return -1;
+      }
+    }
+
+    uvmunmap(p->pagetable, va, 1, 1);
+  }
+
+  /*
+   * 根据解除映射的位置更新 VMA。
+   */
+  if(addr == v->addr && unmapend >= vend){
+    // 删除整个 VMA
+    fileclose(v->file);
+    memset(v, 0, sizeof(*v));
+  } else if(addr == v->addr){
+    // 删除 VMA 开头
+    uint64 removed = realend - v->addr;
+
+    v->addr = realend;
+    v->length = vend - realend;
+    v->offset += removed;
+  } else {
+    // 删除 VMA 结尾
+    v->length = addr - v->addr;
+  }
+
+  return 0;
+}
+
+uint64
+sys_munmap(void)
+{
+  uint64 addr;
+  int length;
+
+  argaddr(0, &addr);
+  argint(1, &length);
+
+  if(length <= 0)
+    return -1;
+
+  return vmaunmap(myproc(), addr, (uint64)length);
 }

@@ -5,6 +5,11 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
+#include "sleeplock.h"
+#include "proc.h"
+#include "file.h"
+#include "fcntl.h"
 
 /*
  * the kernel's page table.
@@ -431,4 +436,81 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+}
+
+int
+vmafault(struct proc *p, uint64 faultva, uint64 cause)
+{
+  struct vma *v;
+  char *mem;
+  uint64 va;
+  uint64 offset;
+  uint64 remain;
+  uint nread;
+  int perm;
+  int n;
+
+  va = PGROUNDDOWN(faultva);
+  v = 0;
+
+  // 查找包含错误地址的 VMA。
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].used &&
+       faultva >= p->vmas[i].addr &&
+       faultva < p->vmas[i].addr + p->vmas[i].length){
+      v = &p->vmas[i];
+      break;
+    }
+  }
+
+  // 错误地址不属于任何 mmap 区域。
+  if(v == 0)
+    return -1;
+
+  // load page fault，但 VMA 不允许读取。
+  if(cause == 13 && !(v->prot & PROT_READ))
+    return -1;
+
+  // store page fault，但 VMA 不允许写入。
+  if(cause == 15 && !(v->prot & PROT_WRITE))
+    return -1;
+
+  mem = kalloc();
+  if(mem == 0)
+    return -1;
+
+  // 文件最后不足一页的部分必须保持为 0。
+  memset(mem, 0, PGSIZE);
+
+  offset = v->offset + (va - v->addr);
+
+  // 最后一页可能不足 PGSIZE。
+  remain = v->length - (va - v->addr);
+  if(remain > PGSIZE)
+    nread = PGSIZE;
+  else
+    nread = remain;
+
+  // 从文件对应位置读取内容。
+  ilock(v->file->ip);
+  n = readi(v->file->ip, 0, (uint64)mem, offset, nread);
+  iunlock(v->file->ip);
+
+  if(n < 0){
+    kfree(mem);
+    return -1;
+  }
+
+  perm = PTE_U | PTE_R;
+
+  if(v->prot & PROT_WRITE)
+    perm |= PTE_W;
+
+  if(mappages(p->pagetable, va, PGSIZE,
+              (uint64)mem, perm) < 0){
+    kfree(mem);
+    return -1;
+  }
+
+  return 0;
 }
