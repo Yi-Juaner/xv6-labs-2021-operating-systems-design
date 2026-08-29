@@ -1,4 +1,4 @@
-// Physical memory allocator, for user processes,
+/// Physical memory allocator, for user processes,
 // kernel stacks, page-table pages,
 // and pipe buffers. Allocates whole 4096-byte pages.
 
@@ -11,14 +11,13 @@
 
 void freerange(void *pa_start, void *pa_end);
 
-extern char end[]; // first address after kernel.
-                   // defined by kernel.ld.
+extern char end[];
 
 struct run {
   struct run *next;
 };
 
-struct kmem {
+struct {
   struct spinlock lock;
   struct run *freelist;
 } kmem[NCPU];
@@ -26,12 +25,14 @@ struct kmem {
 void
 kinit()
 {
-  char name[8];
-  for (int i = 0; i < NCPU; i++) 
-  {
-    snprintf(name, sizeof(name), "kmem%d", i);
-    initlock(&kmem[i].lock, name);
+  for(int i = 0; i < NCPU; i++){
+    /*
+     * initlock 保存的是名字指针，因此不能传入局部字符数组。
+     * 实验允许所有内存分配器锁都使用 "kmem"。
+     */
+    initlock(&kmem[i].lock, "kmem");
   }
+
   freerange(end, (void*)PHYSTOP);
 }
 
@@ -39,71 +40,86 @@ void
 freerange(void *pa_start, void *pa_end)
 {
   char *p;
+
   p = (char*)PGROUNDUP((uint64)pa_start);
+
   for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE)
     kfree(p);
 }
 
-// Free the page of physical memory pointed at by v,
-// which normally should have been returned by a
-// call to kalloc().  (The exception is when
-// initializing the allocator; see kinit above.)
+// Free one page of physical memory.
 void
 kfree(void *pa)
 {
   struct run *r;
+  int id;
 
-  if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
+  if(((uint64)pa % PGSIZE) != 0 ||
+     (char*)pa < end ||
+     (uint64)pa >= PHYSTOP)
     panic("kfree");
+
+  // 填入无效数据，用于发现释放后的错误引用。
+  memset(pa, 1, PGSIZE);
 
   r = (struct run*)pa;
 
   push_off();
-  int cpu = cpuid();
-  acquire(&kmem[cpu].lock);
-  r->next = kmem[cpu].freelist;
-  kmem[cpu].freelist = r;
-  release(&kmem[cpu].lock);
+  id = cpuid();
+
+  acquire(&kmem[id].lock);
+  r->next = kmem[id].freelist;
+  kmem[id].freelist = r;
+  release(&kmem[id].lock);
+
   pop_off();
 }
 
 // Allocate one 4096-byte page of physical memory.
-// Returns a pointer that the kernel can use.
-// Returns 0 if the memory cannot be allocated.
 void *
 kalloc(void)
 {
-  struct run *r;
-  push_off();
-  int cpu = cpuid();
-  acquire(&kmem[cpu].lock);
-  r = kmem[cpu].freelist;
-  if (r) {
-    kmem[cpu].freelist = r->next;
-    release(&kmem[cpu].lock);
-    pop_off();
-    memset((char*)r, 5, PGSIZE); // 可选
-    return (void*)r;
-  }
-  release(&kmem[cpu].lock);
+  struct run *r = 0;
+  int id;
 
-  // 从其他 CPU 偷取
-  for (int i = 0; i < NCPU; i++) {
-    if (i == cpu) continue;
-    acquire(&kmem[i].lock);
-    r = kmem[i].freelist;
-    if (r) {
-      // 偷取一个页
-      kmem[i].freelist = r->next;
+  push_off();
+  id = cpuid();
+
+  // 优先从当前 CPU 的空闲链表分配。
+  acquire(&kmem[id].lock);
+
+  r = kmem[id].freelist;
+  if(r)
+    kmem[id].freelist = r->next;
+
+  release(&kmem[id].lock);
+
+  /*
+   * 当前 CPU 没有空闲页时，从其他 CPU 偷取一个页面。
+   * 每次只持有一把 kmem 锁，因此不会形成锁循环。
+   */
+  if(r == 0){
+    for(int i = 0; i < NCPU; i++){
+      if(i == id)
+        continue;
+
+      acquire(&kmem[i].lock);
+
+      r = kmem[i].freelist;
+      if(r)
+        kmem[i].freelist = r->next;
+
       release(&kmem[i].lock);
-      // 不需要加当前 CPU 锁，直接返回
-      pop_off();
-      memset((char*)r, 5, PGSIZE);
-      return (void*)r;
+
+      if(r)
+        break;
     }
-    release(&kmem[i].lock);
   }
 
   pop_off();
-  return 0;
+
+  if(r)
+    memset((char*)r, 5, PGSIZE);
+
+  return (void*)r;
 }
